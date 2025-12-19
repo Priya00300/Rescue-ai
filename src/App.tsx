@@ -116,26 +116,34 @@ const assignVictimsToDrones = () => {
   const sortedVictims = [...availableVictims].sort((a, b) => b.priority - a.priority);
   const assignments: { drone: Drone; victim: Victim; distance: number }[] = [];
   
-  sortedVictims.forEach(victim => {
+  for (const victim of sortedVictims) {
     let closestDrone: Drone | null = null;
     let minDistance = Infinity;
     
-    idleDrones.forEach(drone => {
-      if (assignments.some(a => a.drone.id === drone.id)) return;
+    for (const drone of idleDrones) {
+      // Skip if already assigned
+      const isAssigned = assignments.find(a => a.drone.id === drone.id);
+      if (isAssigned) continue;
+      
       const distance = manhattanDistance(drone.position, victim.position);
       if (distance < minDistance) {
         minDistance = distance;
         closestDrone = drone;
       }
-    });
+    }
     
+    // Only proceed if we found a drone
     if (closestDrone !== null) {
-      assignments.push({ drone: closestDrone, victim, distance: minDistance });
+      assignments.push({ 
+        drone: closestDrone, 
+        victim, 
+        distance: minDistance 
+      });
       SwarmCommunication.assignVictim(closestDrone.id, victim.id);
     }
-  });
+  }
   
-  return assignments;
+  return assignments;
 };
 
   const startMission = () => {
