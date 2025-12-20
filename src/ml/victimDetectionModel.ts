@@ -32,32 +32,47 @@ export class VictimDetectionModel {
     return tensor;
   }
   
-private async prepareTrainingData(missions: MissionData[]) {
+private async prepareTrainingData(missions: MissionData[]): Promise<{ inputs: tf.Tensor; outputs: tf.Tensor }> {
   const inputs: number[][][] = [];
   const outputs: number[][][] = [];
   
-  missions.forEach(mission => {
-    // Use actual grid size from mission
-    const height = mission.gridSize.height;
-    const width = mission.gridSize.width;
+  // Filter missions to only use those with matching grid size
+  const validMissions = missions.filter(m => 
+    m.gridSize.height === 25 && m.gridSize.width === 30
+  );
+  
+  if (validMissions.length < 5) {
+    throw new Error(`Not enough valid missions. Need 25x30 grids, found only ${validMissions.length} valid missions out of ${missions.length}`);
+  }
+  
+  console.log(`Using ${validMissions.length} valid missions (filtered from ${missions.length})`);
+  
+  validMissions.forEach(mission => {
+    const height = 25;
+    const width = 30;
     
+    // Create input grid
     const inputGrid: number[][] = Array(height).fill(0).map(() => Array(width).fill(0));
     
-    // Mark obstacles based on mission data
+    // Calculate obstacle density
+    const density = (mission.obstacleCount + mission.fireCount) / (height * width);
+    
+    // Fill input grid with obstacle probabilities
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
-        // Add some variation based on obstacle/fire counts
-        const density = (mission.obstacleCount + mission.fireCount) / (height * width);
         inputGrid[y][x] = Math.random() < density ? 0.5 : 0;
       }
     }
     
+    // Create output grid
     const outputGrid: number[][] = Array(height).fill(0).map(() => Array(width).fill(0));
     
+    // Mark victim positions
     mission.victims.forEach(victim => {
       const pos = victim.position;
       if (pos && pos.y < height && pos.x < width) {
-        outputGrid[pos.y][pos.x] = victim.priority / 5;
+        // Normalize priority to 0-1 range
+        outputGrid[pos.y][pos.x] = Math.min(1, Math.max(0, victim.priority / 5));
       }
     });
     
@@ -65,68 +80,80 @@ private async prepareTrainingData(missions: MissionData[]) {
     outputs.push(outputGrid);
   });
   
+  console.log(`Training data shapes: inputs[${inputs.length}][25][30], outputs[${outputs.length}][25][30]`);
+  
+  // Create tensors with explicit types
+  const inputTensor = tf.tensor3d(inputs, [inputs.length, 25, 30]);
+  const outputTensor = tf.tensor3d(outputs, [outputs.length, 25, 30]);
+  
   return {
-    inputs: tf.tensor3d(inputs, [inputs.length, 25, 30]),  // Make sure this matches!
-    outputs: tf.tensor3d(outputs, [outputs.length, 25, 30])
+    inputs: inputTensor,
+    outputs: outputTensor
   };
 }
   
 async buildModel(): Promise<void> {
+  if (this.model) {
+    this.model.dispose();
+  }
+  
   this.model = tf.sequential({
     layers: [
+      // Input: [25, 30, 1]
       tf.layers.conv2d({
-        inputShape: [25, 30, 1],  // CHANGE FROM [25, 30, 1] - match grid size!
+        inputShape: [25, 30, 1],
         filters: 16,
         kernelSize: 3,
         activation: 'relu',
         padding: 'same'
       }),
-        
-        tf.layers.maxPooling2d({
-          poolSize: [2, 2]
-        }),
-        
-        tf.layers.conv2d({
-          filters: 32,
-          kernelSize: 3,
-          activation: 'relu',
-          padding: 'same'
-        }),
-        
-        tf.layers.upSampling2d({
-          size: [2, 2]
-        }),
-        
-        tf.layers.conv2d({
-          filters: 16,
-          kernelSize: 3,
-          activation: 'relu',
-          padding: 'same'
-        }),
-        
-        tf.layers.conv2d({
-          filters: 1,
-          kernelSize: 1,
-          activation: 'sigmoid'
-        })
-      ]
-    });
-    
-    this.model.compile({
-      optimizer: tf.train.adam(0.001),
-      loss: 'binaryCrossentropy',
-      metrics: ['accuracy']
-    });
-  }
+      
+      // Don't use pooling - just more conv layers
+      tf.layers.conv2d({
+        filters: 32,
+        kernelSize: 3,
+        activation: 'relu',
+        padding: 'same'
+      }),
+      
+      tf.layers.conv2d({
+        filters: 16,
+        kernelSize: 3,
+        activation: 'relu',
+        padding: 'same'
+      }),
+      
+      // Output: [25, 30, 1]
+      tf.layers.conv2d({
+        filters: 1,
+        kernelSize: 1,
+        activation: 'sigmoid',
+        padding: 'same'
+      })
+    ]
+  });
   
+  this.model.compile({
+    optimizer: tf.train.adam(0.001),
+    loss: 'binaryCrossentropy',
+    metrics: ['accuracy']
+  });
+  
+  console.log('Model built with input shape: [25, 30, 1] (no pooling)');
+}
 async train(missions: MissionData[], epochs: number = 50): Promise<void> {
-  if (!this.model) {
-    await this.buildModel();
-  }
-  
   if (missions.length < 5) {
     console.log('Need at least 5 missions to train');
     return;
+  }
+  
+  // ALWAYS rebuild model before training to ensure correct shape
+  console.log('Building fresh model...');
+  await this.buildModel();
+  
+  // Check if model was created
+  if (!this.model) {
+    throw new Error('Failed to build model');
   }
   
   this.isTraining = true;
@@ -142,41 +169,46 @@ async train(missions: MissionData[], epochs: number = 50): Promise<void> {
     inputs = trainingData.inputs;
     outputs = trainingData.outputs;
     
-    // Reshape to match model input: [batch, 25, 30, 1]
+    console.log('Input shape:', inputs.shape);
+    console.log('Output shape:', outputs.shape);
+    
+    // Reshape to [batch, 25, 30, 1]
     reshapedInputs = inputs.reshape([missions.length, 25, 30, 1]);
     reshapedOutputs = outputs.reshape([missions.length, 25, 30, 1]);
     
-    await this.model!.fit(reshapedInputs, reshapedOutputs, {
+    console.log('Reshaped input:', reshapedInputs.shape);
+    console.log('Reshaped output:', reshapedOutputs.shape);
+    
+    await this.model.fit(reshapedInputs, reshapedOutputs, {
       epochs,
-      batchSize: Math.min(4, missions.length),
+      batchSize: 2,
       validationSplit: 0.2,
       shuffle: true,
       callbacks: {
-        onEpochEnd: (epoch: number, logs: tf.Logs | undefined) => {
+        onEpochEnd: (epoch: number, logs: any) => {
           this.trainingProgress = ((epoch + 1) / epochs) * 100;
-          const loss = logs?.loss?.toFixed(4) || 'N/A';
-          const valLoss = logs?.val_loss?.toFixed(4) || 'N/A';
-          console.log(`Epoch ${epoch + 1}/${epochs} - Loss: ${loss} - Val Loss: ${valLoss}`);
+          console.log(`Epoch ${epoch + 1}/${epochs} - Loss: ${logs?.loss?.toFixed(4)}`);
         }
-      }
-    });
-    
-    console.log('Training completed successfully');
-    
-  } catch (error) {
-    console.error('Training failed:', error);
-    // Re-throw if you want calling code to handle it
-    throw new Error(`Training failed: ${error}`);
-  } finally {
-    // Cleanup tensors
-    [inputs, outputs, reshapedInputs, reshapedOutputs].forEach(tensor => {
-      if (tensor && !tensor.isDisposed) {
-        tensor.dispose();
       }
     });
     
     this.isTraining = false;
     this.trainingProgress = 100;
+    console.log('Training completed successfully');
+    
+  } catch (error) {
+    console.error('Training error:', error);
+    this.isTraining = false;
+    this.trainingProgress = 0;
+    throw error;
+  } finally {
+    // Safely dispose all tensors
+    const tensors = [inputs, outputs, reshapedInputs, reshapedOutputs];
+    for (const tensor of tensors) {
+      if (tensor && !tensor.isDisposed) {
+        tensor.dispose();
+      }
+    }
   }
 }
   

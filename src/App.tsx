@@ -196,67 +196,76 @@ const assignVictimsToDrones = () => {
   };
 
   const simulateDroneMovement = (path: Position[], droneId: string, victimId: string) => {
-    let currentIndex = 0;
-    
-    const interval = setInterval(() => {
-      if (currentIndex >= path.length) {
-        clearInterval(interval);
+  let currentIndex = 0;
+  
+  const interval = setInterval(() => {
+    if (currentIndex >= path.length) {
+      clearInterval(interval);
+      
+      // Broadcast rescue complete
+      SwarmCommunication.broadcastRescueComplete(droneId, victimId);
+      
+      setVictims(prev => prev.map(v => 
+        v.id === victimId ? { ...v, isRescued: true } : v
+      ));
+      
+      setDrones(prev => {
+        const updated = prev.map(d => 
+          d.id === droneId ? { 
+            ...d, 
+            status: DroneStatus.IDLE,
+            rescuedVictims: d.rescuedVictims + 1,
+            path: [],
+            battery: Math.max(0, d.battery - 10)
+          } : d
+        );
         
-        // Broadcast rescue complete
-        SwarmCommunication.broadcastRescueComplete(droneId, victimId);
-        
-        setVictims(prev => prev.map(v => 
-          v.id === victimId ? { ...v, isRescued: true } : v
-        ));
-        
-        setDrones(prev => {
-          const updated = prev.map(d => 
-            d.id === droneId ? { 
-              ...d, 
-              status: DroneStatus.IDLE,
-              rescuedVictims: d.rescuedVictims + 1,
-              path: [],
-              battery: Math.max(0, d.battery - 10)
-            } : d
-          );
-          
-          setTimeout(() => {
-            const allRescued = victims.every(v => v.isRescued);
-            if (allRescued) {
-              setIsSimulating(false);
-              
-              // Complete mission data collection
-              if (currentMissionId) {
-                DataCollector.completeMission(currentMissionId, missionTime, victims, drones);
-                
-                // Retrain risk prediction model
-                const missions = DataCollector.getMissions();
-                riskPredictionModel.train(missions);
-              }
-              
-              alert(`🎉 Mission Complete! All victims rescued in ${missionTime} seconds!`);
-            } else {
+        // Check mission status ONLY after a short delay to let state settle
+        setTimeout(() => {
+          // Re-check current victims state
+          setVictims(currentVictims => {
+            const allRescued = currentVictims.every(v => v.isRescued);
+            const anyDroneMoving = updated.some(d => d.status === DroneStatus.MOVING);
+            
+            if (allRescued && !anyDroneMoving) {
+  setIsSimulating(false);
+  
+  // Capture the CURRENT mission time
+  const finalTime = missionTime > 0 ? missionTime : Math.floor((Date.now() - (startTime || Date.now())) / 1000);
+  
+  if (currentMissionId) {
+    DataCollector.completeMission(currentMissionId, finalTime, currentVictims, updated);
+    const missions = DataCollector.getMissions();
+    riskPredictionModel.train(missions);
+  }
+  
+  alert(`🎉 Mission Complete! All ${currentVictims.length} victims rescued in ${finalTime} seconds!`);
+} else if (!allRescued && !anyDroneMoving) {
+              // Some victims left and no drones moving - assign more
               const idleDrones = updated.filter(d => d.status === DroneStatus.IDLE);
-              if (idleDrones.length > 0 && victims.some(v => !v.isRescued)) {
+              if (idleDrones.length > 0) {
                 startMission();
               }
             }
-          }, 100);
-          
-          return updated;
-        });
+            
+            return currentVictims;
+          });
+        }, 500); // Wait 500ms for all states to update
         
-        return;
-      }
+        return updated;
+      });
       
-      const newPos = path[currentIndex];
-      setDrones(prev => prev.map(d => 
-        d.id === droneId ? { ...d, position: newPos } : d
-      ));
-      
-      currentIndex++;
-    }, 200);
-  };
+      return;
+    }
+    
+    const newPos = path[currentIndex];
+    setDrones(prev => prev.map(d => 
+      d.id === droneId ? { ...d, position: newPos } : d
+    ));
+    
+    currentIndex++;
+  }, 200);
+};
 
   const handleTrainModel = async () => {
     const missions = DataCollector.getMissions();
