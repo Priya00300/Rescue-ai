@@ -1,6 +1,6 @@
 // src/App.tsx - Complete ML-Powered RescueAI System
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { GridCanvas } from './components/GridCanvas';
 import { MLDashboard } from './components/MLDashboard';
 import { Grid, Drone, Victim, Position, CellType, DroneStatus } from './types';
@@ -12,6 +12,7 @@ import { SwarmCommunication } from './utils/swarmCommunication';
 import { VictimDetectionModel } from './ml/victimDetectionModel';
 import { RiskPredictionModel } from './ml/riskPredictionModel';
 import { AutoSimulator } from './utils/autoSimulator';
+import { VisionUploader } from './components/VisionUploader';
 
 function App() {
   const [currentScenario, setCurrentScenario] = useState<string>('wildfire');
@@ -25,6 +26,7 @@ function App() {
   const [currentMissionId, setCurrentMissionId] = useState<string | null>(null);
   
   // ML States
+  const [showVisionUploader, setShowVisionUploader] = useState(false);
   const [victimDetectionModel] = useState(() => new VictimDetectionModel());
   const [riskPredictionModel] = useState(() => new RiskPredictionModel());
   const [isTrainingModel, setIsTrainingModel] = useState(false);
@@ -38,7 +40,11 @@ function App() {
     total: 0
   });
 
+  // Alert guard flag to prevent duplicate alerts
+  const alertShownRef = useRef(false);
+
   const loadScenario = (scenarioKey: string) => {
+    alertShownRef.current = false; // Reset flag
     const scenario = scenarios[scenarioKey];
     setCurrentScenario(scenarioKey);
     setIsSimulating(false);
@@ -147,6 +153,7 @@ const assignVictimsToDrones = () => {
 };
 
   const startMission = () => {
+    alertShownRef.current = false; // Reset flag when starting new mission
     setIsSimulating(true);
     setStartTime(Date.now());
     setMissionTime(0);
@@ -227,20 +234,23 @@ const assignVictimsToDrones = () => {
             const allRescued = currentVictims.every(v => v.isRescued);
             const anyDroneMoving = updated.some(d => d.status === DroneStatus.MOVING);
             
-            if (allRescued && !anyDroneMoving) {
-  setIsSimulating(false);
-  
-  // Capture the CURRENT mission time
-  const finalTime = missionTime > 0 ? missionTime : Math.floor((Date.now() - (startTime || Date.now())) / 1000);
-  
-  if (currentMissionId) {
-    DataCollector.completeMission(currentMissionId, finalTime, currentVictims, updated);
-    const missions = DataCollector.getMissions();
-    riskPredictionModel.train(missions);
-  }
-  
-  alert(`🎉 Mission Complete! All ${currentVictims.length} victims rescued in ${finalTime} seconds!`);
-} else if (!allRescued && !anyDroneMoving) {
+            if (allRescued && !anyDroneMoving && !alertShownRef.current) {
+              // Set flag IMMEDIATELY to prevent duplicates
+              alertShownRef.current = true;
+              
+              setIsSimulating(false);
+              
+              // Capture the CURRENT mission time
+              const finalTime = missionTime > 0 ? missionTime : Math.floor((Date.now() - (startTime || Date.now())) / 1000);
+              
+              if (currentMissionId && startTime) {
+                DataCollector.completeMission(currentMissionId, finalTime, currentVictims, updated);
+                const missions = DataCollector.getMissions();
+                riskPredictionModel.train(missions);
+              }
+              
+              alert(`🎉 Mission Complete! All ${currentVictims.length} victims rescued in ${finalTime} seconds!`);
+            } else if (!allRescued && !anyDroneMoving) {
               // Some victims left and no drones moving - assign more
               const idleDrones = updated.filter(d => d.status === DroneStatus.IDLE);
               if (idleDrones.length > 0) {
@@ -592,7 +602,58 @@ const assignVictimsToDrones = () => {
               onTrainModel={handleTrainModel}
               onRunAutoSimulations={handleRunAutoSimulations}
             />
-
+{/* Vision System Upload */}
+<div style={styles.card}>
+  <button
+    onClick={() => setShowVisionUploader(!showVisionUploader)}
+    style={{
+      ...styles.buttonPrimary,
+      width: '100%',
+      marginBottom: '1rem',
+      background: showVisionUploader ? '#475569' : 'linear-gradient(to right, #8b5cf6, #ec4899)'
+    }}
+  >
+    {showVisionUploader ? '📷 Hide Vision Upload' : '🤖 Upload Real Disaster Image'}
+  </button>
+  
+  {showVisionUploader && (
+    <VisionUploader
+      onScenarioGenerated={(scenario) => {
+        console.log('Vision scenario received:', scenario);
+        
+        // Update grid with vision data
+        const newGrid = {
+          ...grid,
+          cells: scenario.grid.cells
+        };
+        setGrid(newGrid);
+        
+        // Set victims from AI detection
+        setVictims(scenario.victims);
+        
+        // Update drone positions to safe zones
+        const newDrones = drones.map((drone, idx) => {
+          if (scenario.dronePositions[idx]) {
+            return {
+              ...drone,
+              position: scenario.dronePositions[idx],
+              status: 'idle' as any
+            };
+          }
+          return drone;
+        });
+        setDrones(newDrones);
+        
+        // Update scenario info
+        setCurrentScenario(scenario.scenarioType);
+        
+        // Show success message
+        alert(`✅ Vision Scenario Loaded!\n\nType: ${scenario.scenarioType}\nVictims Detected: ${scenario.victims.length}\nConfidence: ${Math.round(scenario.confidence * 100)}%\n\nClick "Deploy Drone Fleet" to start rescue!`);
+      }}
+      apiUrl="http://localhost:8000"
+    />
+  )}
+</div>
             <div style={styles.card}>
               <h3 style={{ fontSize: '1.25rem', fontWeight: 'bold', marginBottom: '1rem' }}>🌍 Emergency Scenarios</h3>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
